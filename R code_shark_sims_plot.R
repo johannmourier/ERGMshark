@@ -1,0 +1,908 @@
+###R code to simulate shark movement networks and test effectiveness of ERGMs as
+###a statistical tool
+
+##Author: Matthew Silk
+
+#Load required packages
+library(network)
+library(ergm)
+library(ergm.count)
+library(R.utils)
+library(igraph)
+
+set.seed(2)
+
+#Define receiver locations
+n.locs<-25
+locs<-seq(1,n.locs,1)
+x<-runif(n.locs,0,10)
+y<-runif(n.locs,0,10)
+
+loc_place<-cbind(x,y)
+  
+#Plot of receiver locations in geographic space
+plot(x,y)
+  
+# Calculate distance matrix for receiver locations
+dist_mat<-as.matrix(dist(cbind(x,y),upper=TRUE))
+  
+#Define some environmental explanatory variables
+swell<-rnorm(n.locs,0,1)
+rain<-rnorm(n.locs,0,1)
+turbidity<-rnorm(n.locs,0,1)
+  
+#Define a number of sharks
+n.sharks<-10
+sharks<-seq(1,n.sharks,1)
+  
+#Generate a number of movements for each shark
+#Currently set as a Poisson distribution with a mean of 30 movements
+n.movements<-rpois(n.sharks,23)
+  
+#Define simulated effect sizes to test
+effsNC<-seq(0,1.5,0.25)
+effsNM<-seq(0,1.5,0.25)
+  
+effs<-cbind(c(rep(0,7),effsNC,effsNC),c(effsNM,rep(0,7),effsNM))
+  
+FULLRES1<-FULLRES2<-FULLRES3<-list()
+  
+RES1<-matrix(0,nr=nrow(effs),nc=6)
+RES2<-matrix(0,nr=nrow(effs),nc=6)
+RES3<-matrix(0,nr=nrow(effs),nc=6)
+  
+m<-14
+    
+#Sample starting location of each shark
+#Neutral version
+start.locs<-sample(locs,n.sharks,replace=FALSE)
+#High swell locations
+#start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(swell+abs(min(swell)))^2)
+#Low swell locations
+#start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(max(swell)-swell)^2)
+    
+    
+#List to store movements of each shark
+movements<-list()
+    
+#Set parameters for ecological effects on movement network structure
+p1<-effs[m,2]
+p2<-0
+p3<-0
+    
+q1<-effs[m,1]
+q2<-0
+q3<-0
+    
+#Simulate movements for each shark
+for(i in 1:n.sharks){
+  movements[[i]]<-numeric()
+  movements[[i]][1]<-start.locs[i]
+  for(j in 1:n.movements[i]){
+        
+    swell_diffs<-swell-swell[movements[[i]][j]]
+    rain_diffs<-rain-rain[movements[[i]][j]]
+    turb_diffs<-turbidity-turbidity[movements[[i]][j]]
+    dists<-dist_mat[movements[[i]][j],]
+        
+    locs2<-locs[-movements[[i]][j]]
+    swell_diffs2<-swell_diffs[-movements[[i]][j]]
+    swell_diffs2<-max(abs(swell_diffs2))-abs(swell_diffs2)
+    swell_diffs2<-swell_diffs2-mean(swell_diffs2)
+    rain_diffs2<-rain_diffs[-movements[[i]][j]]
+    rain_diffs2<-max(abs(rain_diffs2))-abs(rain_diffs2)
+    rain_diffs2<-rain_diffs2-mean(rain_diffs2)
+    turb_diffs2<-turb_diffs[-movements[[i]][j]]
+    turb_diffs2<-max(abs(turb_diffs2))-abs(turb_diffs2)
+    turb_diffs2<-turb_diffs2-mean(turb_diffs2)
+    dists2<-dists[-movements[[i]][j]]
+        
+    swell_diffs3<-swell_diffs[-movements[[i]][j]]
+    rain_diffs3<-rain_diffs[-movements[[i]][j]]
+    turb_diffs3<-turb_diffs[-movements[[i]][j]]
+        
+    probs<-1/dists2^2
+    probs<-probs/max(probs)
+    logit.probs<-boot::logit(probs)
+    logit.probs<-logit.probs+p1*swell_diffs2+p2*rain_diffs2+p3*turb_diffs2+q1*swell_diffs3+q2*rain_diffs3+q3*turb_diffs3
+    probs2<-boot::inv.logit(logit.probs)
+        
+    movements[[i]][j+1]<-sample(locs2,1,replace=FALSE,prob=probs2)
+        
+    }
+}
+    
+#Create adjacency matrices for each shark
+networks<-list()
+  for(i in 1:length(movements)){
+    networks[[i]]<-matrix(0,nrow=n.locs,ncol=n.locs)
+    for(j in 1:(n.movements[i])){
+      networks[[i]][movements[[i]][j],movements[[i]][j+1]]<-networks[[i]][movements[[i]][j],movements[[i]][j+1]]+1
+    }
+}
+    
+#Create network objects for each shark
+networks2<-list()
+for(i in 1:length(networks)){
+    networks2[[i]]<-as.network(networks[[i]], matrix.type = "adjacency", directed = TRUE,names.eval = "weight",ignore.eval = FALSE,loops=F)
+    networks2[[i]] %v% "swell" <- swell
+    networks2[[i]] %v% "rain" <- rain
+    networks2[[i]] %v% "turbidity" <- turbidity
+}
+    
+#Plot first network
+#plot(networks2[[1]],label = network.vertex.names(networks2[[1]]))
+    
+#Set up arrays to store results
+res1<-array(NA,dim=c(6,5,n.sharks))
+res2<-array(NA,dim=c(6,5,n.sharks))
+res3<-array(NA,dim=c(6,5,n.sharks))
+    
+#Fit ERGMs to the movement of each shark
+for(i in 1:n.sharks){
+  if(max(networks[[i]])>1){
+        
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~nonzero+sum+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~nonzero+sum+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~nonzero+sum+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[,,i]<-summary(x3)$coefficients}
+  }
+  if(max(networks[[i]])==1){
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~edges+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~edges+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~edges+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[2:6,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[2:6,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[2:6,,i]<-summary(x3)$coefficients}
+  }
+  print(i)
+}
+    
+FULLRES1[[m]]<-res1
+FULLRES2[[m]]<-res2
+FULLRES3[[m]]<-res3
+    
+#Summarise results (no. of significant results) for all sharks
+sig_res1<-apply(res1<0.05,1:2,sum,na.rm=T)[,5]
+sig_res2<-apply(res2<0.05,1:2,sum,na.rm=T)[,5]
+sig_res3<-apply(res3<0.05,1:2,sum,na.rm=T)[,5]
+    
+RES1[m,]<-sig_res1
+RES2[m,]<-sig_res2
+RES3[m,]<-sig_res3
+
+##################################
+##################################
+
+lo<-loc_place
+
+par(mfrow=c(0,0,0,0))
+N<-graph.adjacency(networks[[1]],mode="directed",weighted=TRUE)
+plot(N)
+iso<-which(degree(N)==0)
+N2<-delete.vertices(N,iso)
+
+plot(N2,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(15+2*swell[-iso]),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N2)$weight,layout=lo[-iso,])
+
+
+plot(N,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(10+2*swell),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N)$weight,layout=lo)
+
+##################################
+##################################
+
+ests1<-ests3<-errs1<-errs3<-matrix(NA,nr=10,nc=3)
+
+for(i in 1:10){
+  if(sum(is.na(res1[1,,i]))!=length(res1[1,,i])){
+    ests1[i,]<-res1[3:5,1,i]
+    errs1[i,]<-1.96*res1[3:5,2,i]
+    ests3[i,]<-res3[3:5,1,i]
+    errs3[i,]<-1.96*res3[3:5,2,i]
+  }
+}
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests1[,1],ests1[,2],ests1[,3]),y=ys,xlim=c(-1.5,1.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="")
+arrows(x0=c(ests1[,1]-errs1[,1],ests1[,2]-errs1[,2],ests1[,3]-errs1[,3]),y0=ys,x1=c(ests1[,1]+errs1[,1],ests1[,2]+errs1[,2],ests1[,3]+errs1[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests3[,1],ests3[,2],ests3[,3]),y=ys,xlim=c(-1.5,1.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="")
+arrows(x0=c(ests3[,1]-errs3[,1],ests3[,2]-errs3[,2],ests3[,3]-errs3[,3]),y0=ys,x1=c(ests3[,1]+errs3[,1],ests3[,2]+errs3[,2],ests3[,3]+errs3[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+##################################
+##################################
+
+##Second set of sims for moving between low value nodes
+
+set.seed(2)
+
+#Define receiver locations
+n.locs<-25
+locs<-seq(1,n.locs,1)
+x<-runif(n.locs,0,10)
+y<-runif(n.locs,0,10)
+
+loc_place<-cbind(x,y)
+
+#Plot of receiver locations in geographic space
+plot(x,y)
+
+# Calculate distance matrix for receiver locations
+dist_mat<-as.matrix(dist(cbind(x,y),upper=TRUE))
+
+#Define some environmental explanatory variables
+swell<-rnorm(n.locs,0,1)
+rain<-rnorm(n.locs,0,1)
+turbidity<-rnorm(n.locs,0,1)
+
+#Define a number of sharks
+n.sharks<-10
+sharks<-seq(1,n.sharks,1)
+
+#Generate a number of movements for each shark
+#Currently set as a Poisson distribution with a mean of 30 movements
+n.movements<-rpois(n.sharks,23)
+
+#Define simulated effect sizes to test
+effsNC<-seq(0,1.5,0.25)
+effsNM<-seq(0,1.5,0.25)
+
+effs<-cbind(c(rep(0,7),effsNC,effsNC),c(effsNM,rep(0,7),effsNM))
+
+FULLRES1<-FULLRES2<-FULLRES3<-list()
+
+RES1<-matrix(0,nr=nrow(effs),nc=6)
+RES2<-matrix(0,nr=nrow(effs),nc=6)
+RES3<-matrix(0,nr=nrow(effs),nc=6)
+
+m<-7
+
+#Sample starting location of each shark
+#Neutral version
+#start.locs<-sample(locs,n.sharks,replace=FALSE)
+#Low swell locations
+start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(swell+abs(min(swell)))^2)
+#High swell locations
+#start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(max(swell)-swell)^2)
+
+
+#List to store movements of each shark
+movements<-list()
+
+#Set parameters for ecological effects on movement network structure
+p1<-effs[m,2]
+p2<-0
+p3<-0
+
+q1<-effs[m,1]
+q2<-0
+q3<-0
+
+#Simulate movements for each shark
+for(i in 1:n.sharks){
+  movements[[i]]<-numeric()
+  movements[[i]][1]<-start.locs[i]
+  for(j in 1:n.movements[i]){
+    
+    swell_diffs<-swell-swell[movements[[i]][j]]
+    rain_diffs<-rain-rain[movements[[i]][j]]
+    turb_diffs<-turbidity-turbidity[movements[[i]][j]]
+    dists<-dist_mat[movements[[i]][j],]
+    
+    locs2<-locs[-movements[[i]][j]]
+    swell_diffs2<-swell_diffs[-movements[[i]][j]]
+    swell_diffs2<-max(abs(swell_diffs2))-abs(swell_diffs2)
+    swell_diffs2<-swell_diffs2-mean(swell_diffs2)
+    rain_diffs2<-rain_diffs[-movements[[i]][j]]
+    rain_diffs2<-max(abs(rain_diffs2))-abs(rain_diffs2)
+    rain_diffs2<-rain_diffs2-mean(rain_diffs2)
+    turb_diffs2<-turb_diffs[-movements[[i]][j]]
+    turb_diffs2<-max(abs(turb_diffs2))-abs(turb_diffs2)
+    turb_diffs2<-turb_diffs2-mean(turb_diffs2)
+    dists2<-dists[-movements[[i]][j]]
+    
+    swell_diffs3<-swell_diffs[-movements[[i]][j]]
+    rain_diffs3<-rain_diffs[-movements[[i]][j]]
+    turb_diffs3<-turb_diffs[-movements[[i]][j]]
+    
+    probs<-1/dists2^2
+    probs<-probs/max(probs)
+    logit.probs<-boot::logit(probs)
+    logit.probs<-logit.probs+p1*swell_diffs2+p2*rain_diffs2+p3*turb_diffs2+q1*swell_diffs3+q2*rain_diffs3+q3*turb_diffs3
+    probs2<-boot::inv.logit(logit.probs)
+    
+    movements[[i]][j+1]<-sample(locs2,1,replace=FALSE,prob=probs2)
+    
+  }
+}
+
+#Create adjacency matrices for each shark
+networks<-list()
+for(i in 1:length(movements)){
+  networks[[i]]<-matrix(0,nrow=n.locs,ncol=n.locs)
+  for(j in 1:(n.movements[i])){
+    networks[[i]][movements[[i]][j],movements[[i]][j+1]]<-networks[[i]][movements[[i]][j],movements[[i]][j+1]]+1
+  }
+}
+
+#Create network objects for each shark
+networks2<-list()
+for(i in 1:length(networks)){
+  networks2[[i]]<-as.network(networks[[i]], matrix.type = "adjacency", directed = TRUE,names.eval = "weight",ignore.eval = FALSE,loops=F)
+  networks2[[i]] %v% "swell" <- swell
+  networks2[[i]] %v% "rain" <- rain
+  networks2[[i]] %v% "turbidity" <- turbidity
+}
+
+#Plot first network
+#plot(networks2[[1]],label = network.vertex.names(networks2[[1]]))
+
+#Set up arrays to store results
+res1<-array(NA,dim=c(6,5,n.sharks))
+res2<-array(NA,dim=c(6,5,n.sharks))
+res3<-array(NA,dim=c(6,5,n.sharks))
+
+#Fit ERGMs to the movement of each shark
+for(i in 1:n.sharks){
+  if(max(networks[[i]])>1){
+    
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~nonzero+sum+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~nonzero+sum+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~nonzero+sum+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[,,i]<-summary(x3)$coefficients}
+  }
+  if(max(networks[[i]])==1){
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~edges+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~edges+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~edges+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[2:6,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[2:6,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[2:6,,i]<-summary(x3)$coefficients}
+  }
+  print(i)
+}
+
+FULLRES1[[m]]<-res1
+FULLRES2[[m]]<-res2
+FULLRES3[[m]]<-res3
+
+#Summarise results (no. of significant results) for all sharks
+sig_res1<-apply(res1<0.05,1:2,sum,na.rm=T)[,5]
+sig_res2<-apply(res2<0.05,1:2,sum,na.rm=T)[,5]
+sig_res3<-apply(res3<0.05,1:2,sum,na.rm=T)[,5]
+
+RES1[m,]<-sig_res1
+RES2[m,]<-sig_res2
+RES3[m,]<-sig_res3
+
+##################################
+##################################
+
+lo<-loc_place
+
+par(mfrow=c(0,0,0,0))
+N<-graph.adjacency(networks[[1]],mode="directed",weighted=TRUE)
+plot(N)
+iso<-which(degree(N)==0)
+N2<-delete.vertices(N,iso)
+
+plot(N2,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(15+2*swell[-iso]),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N2)$weight,layout=lo[-iso,])
+
+
+plot(N,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(10+2*swell),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N)$weight,layout=lo)
+
+##################################
+##################################
+
+ests1<-ests3<-errs1<-errs3<-matrix(NA,nr=10,nc=3)
+
+for(i in 1:10){
+  if(sum(is.na(res1[1,,i]))!=length(res1[1,,i])){
+    ests1[i,]<-res1[3:5,1,i]
+    errs1[i,]<-1.96*res1[3:5,2,i]
+    ests3[i,]<-res3[3:5,1,i]
+    errs3[i,]<-1.96*res3[3:5,2,i]
+  }
+}
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests1[,1],ests1[,2],ests1[,3]),y=ys,xlim=c(-1.5,1.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="")
+arrows(x0=c(ests1[,1]-errs1[,1],ests1[,2]-errs1[,2],ests1[,3]-errs1[,3]),y0=ys,x1=c(ests1[,1]+errs1[,1],ests1[,2]+errs1[,2],ests1[,3]+errs1[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests3[,1],ests3[,2],ests3[,3]),y=ys,xlim=c(-2.5,2.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="")
+arrows(x0=c(ests3[,1]-errs3[,1],ests3[,2]-errs3[,2],ests3[,3]-errs3[,3]),y0=ys,x1=c(ests3[,1]+errs3[,1],ests3[,2]+errs3[,2],ests3[,3]+errs3[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+##################################
+##################################
+
+
+##Third set of sims for moving between high value nodes
+
+set.seed(2)
+
+#Define receiver locations
+n.locs<-25
+locs<-seq(1,n.locs,1)
+x<-runif(n.locs,0,10)
+y<-runif(n.locs,0,10)
+
+loc_place<-cbind(x,y)
+
+#Plot of receiver locations in geographic space
+plot(x,y)
+
+# Calculate distance matrix for receiver locations
+dist_mat<-as.matrix(dist(cbind(x,y),upper=TRUE))
+
+#Define some environmental explanatory variables
+swell<-rnorm(n.locs,0,1)
+rain<-rnorm(n.locs,0,1)
+turbidity<-rnorm(n.locs,0,1)
+
+#Define a number of sharks
+n.sharks<-10
+sharks<-seq(1,n.sharks,1)
+
+#Generate a number of movements for each shark
+#Currently set as a Poisson distribution with a mean of 30 movements
+n.movements<-rpois(n.sharks,23)
+
+#Define simulated effect sizes to test
+effsNC<-seq(0,1.5,0.25)
+effsNM<-seq(0,1.5,0.25)
+
+effs<-cbind(c(rep(0,7),effsNC,effsNC),c(effsNM,rep(0,7),effsNM))
+
+FULLRES1<-FULLRES2<-FULLRES3<-list()
+
+RES1<-matrix(0,nr=nrow(effs),nc=6)
+RES2<-matrix(0,nr=nrow(effs),nc=6)
+RES3<-matrix(0,nr=nrow(effs),nc=6)
+
+m<-7
+
+#Sample starting location of each shark
+#Neutral version
+#start.locs<-sample(locs,n.sharks,replace=FALSE)
+#Low swell locations
+#start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(swell+abs(min(swell)))^2)
+#High swell locations
+start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(max(swell)-swell)^2)
+
+
+#List to store movements of each shark
+movements<-list()
+
+#Set parameters for ecological effects on movement network structure
+p1<-effs[m,2]
+p2<-0
+p3<-0
+
+q1<-effs[m,1]
+q2<-0
+q3<-0
+
+#Simulate movements for each shark
+for(i in 1:n.sharks){
+  movements[[i]]<-numeric()
+  movements[[i]][1]<-start.locs[i]
+  for(j in 1:n.movements[i]){
+    
+    swell_diffs<-swell-swell[movements[[i]][j]]
+    rain_diffs<-rain-rain[movements[[i]][j]]
+    turb_diffs<-turbidity-turbidity[movements[[i]][j]]
+    dists<-dist_mat[movements[[i]][j],]
+    
+    locs2<-locs[-movements[[i]][j]]
+    swell_diffs2<-swell_diffs[-movements[[i]][j]]
+    swell_diffs2<-max(abs(swell_diffs2))-abs(swell_diffs2)
+    swell_diffs2<-swell_diffs2-mean(swell_diffs2)
+    rain_diffs2<-rain_diffs[-movements[[i]][j]]
+    rain_diffs2<-max(abs(rain_diffs2))-abs(rain_diffs2)
+    rain_diffs2<-rain_diffs2-mean(rain_diffs2)
+    turb_diffs2<-turb_diffs[-movements[[i]][j]]
+    turb_diffs2<-max(abs(turb_diffs2))-abs(turb_diffs2)
+    turb_diffs2<-turb_diffs2-mean(turb_diffs2)
+    dists2<-dists[-movements[[i]][j]]
+    
+    swell_diffs3<-swell_diffs[-movements[[i]][j]]
+    rain_diffs3<-rain_diffs[-movements[[i]][j]]
+    turb_diffs3<-turb_diffs[-movements[[i]][j]]
+    
+    probs<-1/dists2^2
+    probs<-probs/max(probs)
+    logit.probs<-boot::logit(probs)
+    logit.probs<-logit.probs+p1*swell_diffs2+p2*rain_diffs2+p3*turb_diffs2+q1*swell_diffs3+q2*rain_diffs3+q3*turb_diffs3
+    probs2<-boot::inv.logit(logit.probs)
+    
+    movements[[i]][j+1]<-sample(locs2,1,replace=FALSE,prob=probs2)
+    
+  }
+}
+
+#Create adjacency matrices for each shark
+networks<-list()
+for(i in 1:length(movements)){
+  networks[[i]]<-matrix(0,nrow=n.locs,ncol=n.locs)
+  for(j in 1:(n.movements[i])){
+    networks[[i]][movements[[i]][j],movements[[i]][j+1]]<-networks[[i]][movements[[i]][j],movements[[i]][j+1]]+1
+  }
+}
+
+#Create network objects for each shark
+networks2<-list()
+for(i in 1:length(networks)){
+  networks2[[i]]<-as.network(networks[[i]], matrix.type = "adjacency", directed = TRUE,names.eval = "weight",ignore.eval = FALSE,loops=F)
+  networks2[[i]] %v% "swell" <- swell
+  networks2[[i]] %v% "rain" <- rain
+  networks2[[i]] %v% "turbidity" <- turbidity
+}
+
+#Plot first network
+#plot(networks2[[1]],label = network.vertex.names(networks2[[1]]))
+
+#Set up arrays to store results
+res1<-array(NA,dim=c(6,5,n.sharks))
+res2<-array(NA,dim=c(6,5,n.sharks))
+res3<-array(NA,dim=c(6,5,n.sharks))
+
+#Fit ERGMs to the movement of each shark
+for(i in 1:n.sharks){
+  if(max(networks[[i]])>1){
+    
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~nonzero+sum+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~nonzero+sum+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~nonzero+sum+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[,,i]<-summary(x3)$coefficients}
+  }
+  if(max(networks[[i]])==1){
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~edges+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~edges+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~edges+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[2:6,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[2:6,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[2:6,,i]<-summary(x3)$coefficients}
+  }
+  print(i)
+}
+
+FULLRES1[[m]]<-res1
+FULLRES2[[m]]<-res2
+FULLRES3[[m]]<-res3
+
+#Summarise results (no. of significant results) for all sharks
+sig_res1<-apply(res1<0.05,1:2,sum,na.rm=T)[,5]
+sig_res2<-apply(res2<0.05,1:2,sum,na.rm=T)[,5]
+sig_res3<-apply(res3<0.05,1:2,sum,na.rm=T)[,5]
+
+RES1[m,]<-sig_res1
+RES2[m,]<-sig_res2
+RES3[m,]<-sig_res3
+
+##################################
+##################################
+
+lo<-loc_place
+
+par(mfrow=c(0,0,0,0))
+N<-graph.adjacency(networks[[1]],mode="directed",weighted=TRUE)
+plot(N)
+iso<-which(degree(N)==0)
+N2<-delete.vertices(N,iso)
+
+plot(N2,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(15+2*swell[-iso]),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N2)$weight,layout=lo[-iso,])
+
+
+plot(N,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(10+2*swell),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N)$weight,layout=lo)
+
+##################################
+##################################
+
+ests1<-ests3<-errs1<-errs3<-matrix(NA,nr=10,nc=3)
+
+for(i in 1:10){
+  if(sum(is.na(res1[1,,i]))!=length(res1[1,,i])){
+    ests1[i,]<-res1[3:5,1,i]
+    errs1[i,]<-1.96*res1[3:5,2,i]
+    ests3[i,]<-res3[3:5,1,i]
+    errs3[i,]<-1.96*res3[3:5,2,i]
+  }
+}
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests1[,1],ests1[,2],ests1[,3]),y=ys,xlim=c(-1.5,1.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="")
+arrows(x0=c(ests1[,1]-errs1[,1],ests1[,2]-errs1[,2],ests1[,3]-errs1[,3]),y0=ys,x1=c(ests1[,1]+errs1[,1],ests1[,2]+errs1[,2],ests1[,3]+errs1[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests3[,1],ests3[,2],ests3[,3]),y=ys,xlim=c(-2.5,2.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="")
+arrows(x0=c(ests3[,1]-errs3[,1],ests3[,2]-errs3[,2],ests3[,3]-errs3[,3]),y0=ys,x1=c(ests3[,1]+errs3[,1],ests3[,2]+errs3[,2],ests3[,3]+errs3[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+##################################
+##################################
+
+
+##Fourth set of sims for moving up a gradient and between high value nodes
+
+set.seed(26) #16 is pretty good #19 is OK #8 is the original could go back to if we don't mind one missing shark - #11 great but still one missing - #15 really nice but only 9
+
+#Define receiver locations
+n.locs<-25
+locs<-seq(1,n.locs,1)
+x<-runif(n.locs,0,10)
+y<-runif(n.locs,0,10)
+
+loc_place<-cbind(x,y)
+
+#Plot of receiver locations in geographic space
+plot(x,y)
+
+# Calculate distance matrix for receiver locations
+dist_mat<-as.matrix(dist(cbind(x,y),upper=TRUE))
+
+#Define some environmental explanatory variables
+swell<-rnorm(n.locs,0,1)
+rain<-rnorm(n.locs,0,1)
+turbidity<-rnorm(n.locs,0,1)
+
+#Define a number of sharks
+n.sharks<-10
+sharks<-seq(1,n.sharks,1)
+
+#Generate a number of movements for each shark
+#Currently set as a Poisson distribution with a mean of 30 movements
+n.movements<-rpois(n.sharks,23)
+
+#Define simulated effect sizes to test
+effsNC<-seq(0,1.5,0.25)
+effsNM<-seq(0,1.5,0.25)
+
+effs<-cbind(c(rep(0,7),effsNC,effsNC),c(effsNM,rep(0,7),effsNM))
+
+FULLRES1<-FULLRES2<-FULLRES3<-list()
+
+RES1<-matrix(0,nr=nrow(effs),nc=6)
+RES2<-matrix(0,nr=nrow(effs),nc=6)
+RES3<-matrix(0,nr=nrow(effs),nc=6)
+
+m<-21
+
+#Sample starting location of each shark
+#Neutral version
+#start.locs<-sample(locs,n.sharks,replace=FALSE)
+#Low swell locations
+#start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(swell+abs(min(swell)))^2)
+#High swell locations
+start.locs<-sample(locs,n.sharks,replace=FALSE,prob=(max(swell)-swell)^2)
+
+
+#List to store movements of each shark
+movements<-list()
+
+#Set parameters for ecological effects on movement network structure
+p1<-effs[m,2]
+p2<-0
+p3<-0
+
+q1<-effs[m,1]
+q2<-0
+q3<-0
+
+#Simulate movements for each shark
+for(i in 1:n.sharks){
+  movements[[i]]<-numeric()
+  movements[[i]][1]<-start.locs[i]
+  for(j in 1:n.movements[i]){
+    
+    swell_diffs<-swell-swell[movements[[i]][j]]
+    rain_diffs<-rain-rain[movements[[i]][j]]
+    turb_diffs<-turbidity-turbidity[movements[[i]][j]]
+    dists<-dist_mat[movements[[i]][j],]
+    
+    locs2<-locs[-movements[[i]][j]]
+    swell_diffs2<-swell_diffs[-movements[[i]][j]]
+    swell_diffs2<-max(abs(swell_diffs2))-abs(swell_diffs2)
+    swell_diffs2<-swell_diffs2-mean(swell_diffs2)
+    rain_diffs2<-rain_diffs[-movements[[i]][j]]
+    rain_diffs2<-max(abs(rain_diffs2))-abs(rain_diffs2)
+    rain_diffs2<-rain_diffs2-mean(rain_diffs2)
+    turb_diffs2<-turb_diffs[-movements[[i]][j]]
+    turb_diffs2<-max(abs(turb_diffs2))-abs(turb_diffs2)
+    turb_diffs2<-turb_diffs2-mean(turb_diffs2)
+    dists2<-dists[-movements[[i]][j]]
+    
+    swell_diffs3<-swell_diffs[-movements[[i]][j]]
+    rain_diffs3<-rain_diffs[-movements[[i]][j]]
+    turb_diffs3<-turb_diffs[-movements[[i]][j]]
+    
+    probs<-1/dists2^2
+    probs<-probs/max(probs)
+    logit.probs<-boot::logit(probs)
+    logit.probs<-logit.probs+p1*swell_diffs2+p2*rain_diffs2+p3*turb_diffs2+q1*swell_diffs3+q2*rain_diffs3+q3*turb_diffs3
+    probs2<-boot::inv.logit(logit.probs)
+    
+    movements[[i]][j+1]<-sample(locs2,1,replace=FALSE,prob=probs2)
+    
+  }
+}
+
+#Create adjacency matrices for each shark
+networks<-list()
+for(i in 1:length(movements)){
+  networks[[i]]<-matrix(0,nrow=n.locs,ncol=n.locs)
+  for(j in 1:(n.movements[i])){
+    networks[[i]][movements[[i]][j],movements[[i]][j+1]]<-networks[[i]][movements[[i]][j],movements[[i]][j+1]]+1
+  }
+}
+
+#Create network objects for each shark
+networks2<-list()
+for(i in 1:length(networks)){
+  networks2[[i]]<-as.network(networks[[i]], matrix.type = "adjacency", directed = TRUE,names.eval = "weight",ignore.eval = FALSE,loops=F)
+  networks2[[i]] %v% "swell" <- swell
+  networks2[[i]] %v% "rain" <- rain
+  networks2[[i]] %v% "turbidity" <- turbidity
+}
+
+#Plot first network
+#plot(networks2[[1]],label = network.vertex.names(networks2[[1]]))
+
+#Set up arrays to store results
+res1<-array(NA,dim=c(6,5,n.sharks))
+res2<-array(NA,dim=c(6,5,n.sharks))
+res3<-array(NA,dim=c(6,5,n.sharks))
+
+#Fit ERGMs to the movement of each shark
+for(i in 1:n.sharks){
+  if(max(networks[[i]])>1){
+    
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~nonzero+sum+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~nonzero+sum+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~nonzero+sum+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist'),response='weight',reference = ~Poisson,control=control.ergm(MCMLE.Hummel.maxit=1000,MPLE.type="penalized")),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[,,i]<-summary(x3)$coefficients}
+  }
+  if(max(networks[[i]])==1){
+    x<-x2<-x3<-NULL
+    withTimeout(x<-ergm(networks2[[i]]~edges+nodeicov("swell")+nodeicov("rain")+nodeicov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x2<-ergm(networks2[[i]]~edges+nodeocov("swell")+nodeocov("rain")+nodeocov("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    withTimeout(x3<-ergm(networks2[[i]]~edges+absdiff("swell")+absdiff("rain")+absdiff("turbidity")+edgecov(dist_mat,'Geodist')),timeout=60,onTimeout="silent")
+    if(length(x)>0){res1[2:6,,i]<-summary(x)$coefficients}
+    if(length(x2)>0){res2[2:6,,i]<-summary(x2)$coefficients}
+    if(length(x3)>0){res3[2:6,,i]<-summary(x3)$coefficients}
+  }
+  print(i)
+}
+
+FULLRES1[[m]]<-res1
+FULLRES2[[m]]<-res2
+FULLRES3[[m]]<-res3
+
+#Summarise results (no. of significant results) for all sharks
+sig_res1<-apply(res1<0.05,1:2,sum,na.rm=T)[,5]
+sig_res2<-apply(res2<0.05,1:2,sum,na.rm=T)[,5]
+sig_res3<-apply(res3<0.05,1:2,sum,na.rm=T)[,5]
+
+RES1[m,]<-sig_res1
+RES2[m,]<-sig_res2
+RES3[m,]<-sig_res3
+
+##################################
+##################################
+
+lo<-loc_place
+
+par(mfrow=c(0,0,0,0))
+N<-graph.adjacency(networks[[1]],mode="directed",weighted=TRUE)
+plot(N)
+iso<-which(degree(N)==0)
+N2<-delete.vertices(N,iso)
+
+plot(N2,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(15+2*swell[-iso]),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N2)$weight,layout=lo[-iso,])
+
+
+plot(N,edge.curved=0.4,
+     vertex.color="gray95",vertex.frame.color="black",vertex.frame.width=2,vertex.size=(10+2*swell),
+     vertex.label=NA,
+     edge.color="gray15",edge.width=E(N)$weight,layout=lo)
+
+##################################
+##################################
+
+ests1<-ests3<-errs1<-errs3<-matrix(NA,nr=10,nc=3)
+
+for(i in 1:10){
+  if(sum(is.na(res1[1,,i]))!=length(res1[1,,i])){
+    ests1[i,]<-res1[3:5,1,i]
+    errs1[i,]<-1.96*res1[3:5,2,i]
+    ests3[i,]<-res3[3:5,1,i]
+    errs3[i,]<-1.96*res3[3:5,2,i]
+  }
+}
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests1[,1],ests1[,2],ests1[,3]),y=ys,xlim=c(-2,2),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="",cex.axis=1.5,cex.lab=2)
+arrows(x0=c(ests1[,1]-errs1[,1],ests1[,2]-errs1[,2],ests1[,3]-errs1[,3]),y0=ys,x1=c(ests1[,1]+errs1[,1],ests1[,2]+errs1[,2],ests1[,3]+errs1[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+ys<-c(seq(20,15,length.out=10),seq(12.5,7.5,length.out=10),seq(5,0,length.out=10))
+par(xpd=FALSE)
+plot(x=c(ests3[,1],ests3[,2],ests3[,3]),y=ys,xlim=c(-2.5,2.5),cex=2,pch=16,col=c(rep("firebrick",10),rep("gray50",20)),yaxt="n",xlab="Model Estimate",ylab="",cex.axis=1.5,cex.lab=2)
+arrows(x0=c(ests3[,1]-errs3[,1],ests3[,2]-errs3[,2],ests3[,3]-errs3[,3]),y0=ys,x1=c(ests3[,1]+errs3[,1],ests3[,2]+errs3[,2],ests3[,3]+errs3[,3]),y1=ys,angle=90,length=0.05,code=3,col=c(rep("firebrick",10),rep("gray50",20)))
+lines(x=c(0,0),y=c(-100,100))
+mtext("Swell",at=17.5,side=2,line=2,cex=2)
+mtext("Rain",at=10,side=2,line=2,cex=2)
+mtext("Turbidity",at=2.5,side=2,line=2,cex=2)
+
+##################################
+##################################
+
